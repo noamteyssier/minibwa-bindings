@@ -6,6 +6,7 @@
 use minibwa::{Aligner, Index as RsIndex, Meth, Opts as RsOpts, ThreadBuf};
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 fn map_err(e: minibwa::Error) -> PyErr {
@@ -35,8 +36,10 @@ impl PyIndex {
     /// Writes ``<prefix>.mbw`` and ``<prefix>.l2b`` to disk.
     ///
     /// Args:
-    ///     fasta:   Path to the reference FASTA (may be gzipped).
-    ///     prefix:  Output file prefix (directory must exist).
+    ///     fasta:   Path to the reference FASTA (may be gzipped); ``str`` or
+    ///              ``os.PathLike``.
+    ///     prefix:  Output file prefix (directory must exist); ``str`` or
+    ///              ``os.PathLike``.
     ///     meth:    Build a bisulfite/EM-seq methylation index (default
     ///              ``False``).
     ///     threads: Number of threads for index construction (default 1).
@@ -46,14 +49,15 @@ impl PyIndex {
     ///     RuntimeError: On I/O or internal errors.
     #[staticmethod]
     #[pyo3(signature = (fasta, prefix, meth=false, threads=1))]
-    fn build(fasta: &str, prefix: &str, meth: bool, threads: u32) -> PyResult<()> {
-        RsIndex::build_from_fasta(fasta, prefix, meth, threads).map_err(map_err)
+    fn build(fasta: PathBuf, prefix: PathBuf, meth: bool, threads: u32) -> PyResult<()> {
+        RsIndex::build_from_fasta(&fasta, &prefix, meth, threads).map_err(map_err)
     }
 
     /// Load a previously built minibwa index from disk.
     ///
     /// Args:
-    ///     prefix: File prefix used when the index was built.
+    ///     prefix: File prefix used when the index was built; ``str`` or
+    ///             ``os.PathLike``.
     ///     meth:   Load as a methylation index (must match build setting,
     ///             default ``False``).
     ///
@@ -64,9 +68,9 @@ impl PyIndex {
     ///     RuntimeError: If the index files cannot be read.
     #[staticmethod]
     #[pyo3(signature = (prefix, meth=false))]
-    fn load(prefix: &str, meth: bool) -> PyResult<Self> {
+    fn load(prefix: PathBuf, meth: bool) -> PyResult<Self> {
         Ok(PyIndex {
-            inner: Arc::new(RsIndex::load(prefix, meth).map_err(map_err)?),
+            inner: Arc::new(RsIndex::load(&prefix, meth).map_err(map_err)?),
         })
     }
 
@@ -170,9 +174,9 @@ impl PyOpts {
     /// Set the gap-open penalty.
     ///
     /// Args:
-    ///     open: Gap-open penalty (``q`` parameter, positive integer).
-    fn set_gap_open(&mut self, open: i32) {
-        self.inner = self.inner.clone().set_gap_open(open);
+    ///     penalty: Gap-open penalty (``q`` parameter, positive integer).
+    fn set_gap_open(&mut self, penalty: i32) {
+        self.inner = self.inner.clone().set_gap_open(penalty);
     }
 
     /// Set the gap-extend penalty.
@@ -216,6 +220,8 @@ impl PyOpts {
 ///     is_supplementary (bool): ``True`` for supplementary alignments.
 ///     cigar (list[tuple[str, int]]): CIGAR operations as (op_char, length)
 ///                          pairs, e.g. ``[('M', 150)]``.
+///     cigar_string (str):  CIGAR as a SAM-style string, e.g. ``"150M"``
+///                          (``"*"`` if empty).
 #[pyclass(name = "Hit")]
 struct PyHit {
     #[pyo3(get)]
@@ -257,7 +263,25 @@ impl PyHit {
     /// is the preferred accessor.
     #[getter]
     fn strand(&self) -> &'static str {
-        if self.reverse { "-" } else { "+" }
+        if self.reverse {
+            "-"
+        } else {
+            "+"
+        }
+    }
+
+    /// Return the CIGAR as a SAM-style string, e.g. ``"100M5I45M"``.
+    ///
+    /// Returns ``"*"`` when the CIGAR is empty (unmapped).
+    #[getter]
+    fn cigar_string(&self) -> String {
+        if self.cigar.is_empty() {
+            return "*".to_owned();
+        }
+        self.cigar
+            .iter()
+            .map(|(op, len)| format!("{len}{op}"))
+            .collect()
     }
 
     fn __repr__(&self) -> String {
@@ -304,7 +328,11 @@ fn to_pyhit(h: minibwa::Hit) -> PyHit {
         is_primary: h.is_primary,
         is_secondary: h.is_secondary,
         is_supplementary: h.is_supplementary,
-        cigar: h.cigar.iter().map(|c| (cigar_char(c.kind), c.len)).collect(),
+        cigar: h
+            .cigar
+            .iter()
+            .map(|c| (cigar_char(c.kind), c.len))
+            .collect(),
     }
 }
 
@@ -313,13 +341,19 @@ fn to_pyhit(h: minibwa::Hit) -> PyHit {
 /// The GIL is released during alignment so the call does not block other
 /// Python threads.
 ///
+/// To align many reads, prefer ``map_many``: it batches BWT seeding across the
+/// whole set and is substantially faster than calling ``map`` in a loop.
+///
 /// Args:
 ///     index: A loaded ``Index``.
 ///     opts:  Alignment options.
 ///     name:  Read name (must not contain NUL bytes).
 ///     seq:   Read sequence (non-empty DNA string).
 ///     meth:  Methylation strand — ``"none"`` (default), ``"c2t"``, or
-///            ``"g2a"``.  ``Meth`` enum values are accepted too.
+///            ``"g2a"``.  ``Meth`` enum values are accepted too.  A non-``"none"``
+///            value requires ``index`` to have been built and loaded with
+///            ``meth=True``; otherwise the conversion is applied against an
+///            unconverted reference and the alignments are silently wrong.
 ///
 /// Returns:
 ///     ``list[Hit]`` — may be empty if the read does not align.
@@ -360,7 +394,9 @@ fn map(
 ///
 /// Enables paired-end scoring, mate rescue, and proper-pair flagging via
 /// minibwa's PE path.  If the options enable methylation, R1 is treated as
-/// C2T and R2 as G2A automatically.  The GIL is released during alignment.
+/// C2T and R2 as G2A automatically; this requires ``index`` to have been built
+/// and loaded with ``meth=True``, otherwise the alignments are silently wrong.
+/// The GIL is released during alignment.
 ///
 /// Args:
 ///     index: A loaded ``Index``.
@@ -413,7 +449,9 @@ fn map_pair(
 /// across the whole slice (prefetch-driven), which the single-read ``map``
 /// cannot do.  Paired-end mode is forced off — reads are aligned
 /// independently.  If the options enable methylation, every read is treated
-/// as the C2T (read-1) strand; use ``map`` per read for G2A.
+/// as the C2T (read-1) strand; use ``map`` per read for G2A.  Methylation
+/// requires ``index`` to have been built and loaded with ``meth=True``,
+/// otherwise the alignments are silently wrong.
 ///
 /// ``names`` and ``seqs`` must be the same length.
 ///

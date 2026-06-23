@@ -1,6 +1,7 @@
 """Tests for minibwa alignment functions."""
 
 import os
+import pathlib
 import tempfile
 
 import minibwa
@@ -57,6 +58,19 @@ def test_build_load_map() -> None:
         assert len(h.cigar) >= 1
         assert h.cigar[0][0] in "M=X"
         assert repr(hits[0]).startswith("Hit(")
+
+
+def test_build_load_accepts_pathlike() -> None:
+    # Bioinformatics callers pass pathlib.Path; build/load must accept os.PathLike,
+    # not just str.
+    ref = _synthetic_reference(5000)
+    with tempfile.TemporaryDirectory() as d:
+        fa = pathlib.Path(d) / "ref.fa"
+        fa.write_text(">chr1\n" + ref + "\n")
+        prefix = pathlib.Path(d) / "idx"
+        minibwa.Index.build(fa, prefix, meth=False, threads=1)
+        idx = minibwa.Index.load(prefix, meth=False)
+        assert idx.n_contigs() == 1
 
 
 def test_map_pair() -> None:
@@ -150,6 +164,13 @@ def test_hit_strand_and_fields() -> None:
         assert not h.is_secondary
         assert not h.is_supplementary
 
+        # cigar_string mirrors the cigar tuples as a SAM-style string. The
+        # empty-CIGAR "*" branch isn't reachable from Python (unmapped reads
+        # come back as an empty list, never a Hit); the Rust crate covers it
+        # directly (hit.rs::cigar_string_empty_is_star).
+        assert h.cigar_string == "".join(f"{n}{op}" for op, n in h.cigar)
+        assert h.cigar_string != "*"
+
 
 def test_error_paths() -> None:
     ref = _synthetic_reference(5000)
@@ -174,6 +195,29 @@ def test_error_paths() -> None:
             minibwa.Opts(preset="nope")
 
 
+def test_error_paths_names_and_batches() -> None:
+    ref = _synthetic_reference(5000)
+    with tempfile.TemporaryDirectory() as d:
+        idx, opts = _build_index(d, ref)
+        query = ref[1000:1150]
+
+        # NUL byte in a read name → ValueError.
+        with pytest.raises(ValueError):
+            minibwa.map(idx, opts, "bad\x00name", query)
+
+        # map_pair with an empty mate → ValueError.
+        with pytest.raises(ValueError):
+            minibwa.map_pair(idx, opts, "p1", query, "p2", "")
+
+        # map_many with mismatched names/seqs lengths → ValueError.
+        with pytest.raises(ValueError):
+            minibwa.map_many(idx, opts, ["r0", "r1"], [query])
+
+        # map_many with an empty sequence → ValueError.
+        with pytest.raises(ValueError):
+            minibwa.map_many(idx, opts, ["r0"], [""])
+
+
 def test_opts_setters() -> None:
     ref = _synthetic_reference(5000)
     with tempfile.TemporaryDirectory() as d:
@@ -193,3 +237,16 @@ def test_opts_setters() -> None:
         query = ref[1000:1150]
         hits = minibwa.map(idx, o, "r", query)
         assert isinstance(hits, list)
+
+
+def test_opts_setters_keyword_form() -> None:
+    # The documented keyword names (mirrored in the .pyi stub) must match the
+    # actual parameter names, so callers and type checkers agree.
+    o = minibwa.Opts()
+    o.set_min_seed_len(v=19)
+    o.set_out_n(v=5)
+    o.set_match_score(score=1)
+    o.set_mismatch_penalty(penalty=4)
+    o.set_gap_open(penalty=6)
+    o.set_gap_extend(extend=1)
+    o.set_pe_insert_size(avg=400, std=50, lo=200, hi=600)

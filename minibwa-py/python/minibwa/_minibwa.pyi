@@ -1,15 +1,22 @@
 """Type stubs for the compiled minibwa._minibwa extension module."""
 
+import os
+
 class Index:
     """A minibwa reference index."""
 
     @staticmethod
-    def build(fasta: str, prefix: str, meth: bool = False, threads: int = 1) -> None:
+    def build(
+        fasta: str | os.PathLike[str],
+        prefix: str | os.PathLike[str],
+        meth: bool = False,
+        threads: int = 1,
+    ) -> None:
         """Build a minibwa index from a FASTA file."""
         ...
 
     @staticmethod
-    def load(prefix: str, meth: bool = False) -> "Index":
+    def load(prefix: str | os.PathLike[str], meth: bool = False) -> "Index":
         """Load a previously built minibwa index from disk."""
         ...
 
@@ -67,24 +74,44 @@ class Opts:
 class Hit:
     """One alignment result."""
 
-    contig: str | None
-    ref_start: int
-    ref_end: int
-    query_start: int
-    query_end: int
-    reverse: bool
-    mapq: int
-    score: int
-    n_sub: int
-    proper_pair: bool
-    is_primary: bool
-    is_secondary: bool
-    is_supplementary: bool
-    cigar: list[tuple[str, int]]
-
+    # Read-only getters (pyo3 `#[pyo3(get)]`), declared as properties so a type
+    # checker rejects assignment, matching the runtime.
+    @property
+    def contig(self) -> str | None: ...
+    @property
+    def ref_start(self) -> int: ...
+    @property
+    def ref_end(self) -> int: ...
+    @property
+    def query_start(self) -> int: ...
+    @property
+    def query_end(self) -> int: ...
+    @property
+    def reverse(self) -> bool: ...
+    @property
+    def mapq(self) -> int: ...
+    @property
+    def score(self) -> int: ...
+    @property
+    def n_sub(self) -> int: ...
+    @property
+    def proper_pair(self) -> bool: ...
+    @property
+    def is_primary(self) -> bool: ...
+    @property
+    def is_secondary(self) -> bool: ...
+    @property
+    def is_supplementary(self) -> bool: ...
+    @property
+    def cigar(self) -> list[tuple[str, int]]: ...
     @property
     def strand(self) -> str:
         """Return '+' for forward-strand or '-' for reverse."""
+        ...
+
+    @property
+    def cigar_string(self) -> str:
+        """Return the CIGAR as a SAM-style string (e.g. '150M'), or '*' if empty."""
         ...
 
     def __repr__(self) -> str: ...

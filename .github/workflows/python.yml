@@ -18,6 +18,10 @@ defaults:
 
 jobs:
   python:
+    strategy:
+      fail-fast: false
+      matrix:
+        env: [py313, py314]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -26,9 +30,18 @@ jobs:
       - name: Install build deps (Linux)
         run: sudo apt-get update && sudo apt-get install -y build-essential zlib1g-dev
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          components: rustfmt, clippy
       - uses: Swatinem/rust-cache@98c8021b550208e191a6a3145459bfc9fb29c4c0 # v2
         with:
           workspaces: minibwa-py
+      # minibwa-py is excluded from the workspace, so the check.yml fmt/lint
+      # jobs (which run --all over the workspace) never see its Rust source.
+      # Gate it here instead.
+      - name: Check Rust formatting
+        run: cargo ci-fmt
+      - name: Clippy (Rust)
+        run: cargo ci-lint
       - uses: prefix-dev/setup-pixi@8ca4608ef7f4daeb54f5205b20d0b7cb42f11143 # v0.8.1
         with:
           pixi-version: v0.66.0
@@ -40,7 +53,8 @@ jobs:
         run: pixi run lint
       - name: Type check
         run: pixi run typecheck
-      - name: Build & install editable extension
-        run: pixi run develop
-      - name: Run tests
-        run: pixi run test
+      # Build and test the abi3 extension against each supported interpreter
+      # (matrix above) so a pyo3/Python incompatibility can't slip through — the
+      # wheels are abi3, but the build still runs against the active interpreter.
+      - name: Build & test
+        run: pixi run -e ${{ matrix.env }} test
